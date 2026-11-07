@@ -6,23 +6,27 @@ const app = express();
 
 app.use(bodyParser.urlencoded({ extended: true }));
 
-app.post('/', (req, res) => {
-  const input = req.body.username;
-  const template = `
-doctype
+const template = `
+doctype html
 html
-head
+  head
     title= 'Hello world'
-body
+  body
     form(action='/' method='post')
-        input#username.form-control(type='text' name='username' value='${input}')
-        button.btn.btn-primary(type='submit') Submit
-    p Hello ${input}`;
-  const fn = pug.compile(template);
-  const html = fn();
+      input#username.form-control(type='text' name='username' value=username)
+      button.btn.btn-primary(type='submit') Submit
+    p Hello #{username}
+`;
+
+const renderTemplate = pug.compile(template);
+
+app.post('/', (req, res) => {
+  const input = String(req.body.username ?? '');
+  const html = renderTemplate({ username: input });
+
   res.send(html);
 });
 
 app.listen(3000, () => {
   console.log('Server is running on port 3000');
-});
+}); 
