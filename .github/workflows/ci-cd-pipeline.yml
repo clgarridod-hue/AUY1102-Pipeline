@@ -52,6 +52,7 @@ jobs:
 
   sonarcloud-analysis:
     name: 2. SonarCloud SAST y Quality Gate
+    if: github.event_name == 'pull_request'
     needs: [docker-build-and-test]
     runs-on: ubuntu-latest
     steps:
@@ -148,9 +149,17 @@ jobs:
           image: local://auy1102-pipeline:${{ github.sha }}
           only-severities: critical
           exit-code: true
+          write-comment: false
 
   publish-dockerhub:
     name: 6. Publicar Imagen en Docker Hub
+    if: |
+      always() &&
+      needs.docker-build-and-test.result == 'success' &&
+      (needs.sonarcloud-analysis.result == 'success' || needs.sonarcloud-analysis.result == 'skipped') &&
+      needs.snyk-analysis.result == 'success' &&
+      needs.ghas-security.result == 'success' &&
+      needs.docker-scout-scan.result == 'success'
     needs:
       - docker-build-and-test
       - sonarcloud-analysis
