@@ -1,0 +1,78 @@
+name: GitHub Advanced Security Workflow
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: read
+  actions: read
+  packages: read
+
+jobs:
+  dependency-review:
+    name: GHAS - Analisis de Dependencias
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Dependency Review (Pull Request a main)
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4
+        with:
+          fail-on-severity: critical
+
+      - name: Verificar arbol de dependencias de produccion (Push a develop)
+        if: github.event_name != 'pull_request'
+        run: npm sbom --package-lock-only --sbom-format spdx --omit=dev > sbom-prod.spdx.json
+
+  secret-scanning:
+    name: GHAS - Escaneo de Secretos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Ejecutar escaneo de secretos y generar reporte SARIF
+        id: gitleaks
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz | tar -xz gitleaks
+          set +e
+          ./gitleaks detect --source . --no-git --redact --verbose --report-format sarif --report-path gitleaks-results.sarif
+          SCAN_EXIT=$?
+          set -e
+          echo "exit_code=${SCAN_EXIT}" >> "$GITHUB_OUTPUT"
+
+      - name: Publicar hallazgos de secretos en GitHub Advanced Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@74c1aea9df7c0f02e9b7bfe4a8935abf2e5e3aa6 # v3
+        with:
+          sarif_file: gitleaks-results.sarif
+          category: ghas-secret-scanning
+
+      - name: Bloquear si se detectan secretos expuestos
+        if: steps.gitleaks.outputs.exit_code != '0'
+        run: |
+          echo "::error::Se detectaron secretos o credenciales expuestas en el repositorio. Interrumpiendo pipeline."
+          exit 1
+
+  codeql-sast:
+    name: GHAS - Analisis Estático CodeQL
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Inicializar CodeQL
+        uses: github/codeql-action/init@74c1aea9df7c0f02e9b7bfe4a8935abf2e5e3aa6 # v3
+        with:
+          languages: javascript-typescript
+          build-mode: none
+          queries: security-extended
+
+      - name: Ejecutar Analisis CodeQL
+        uses: github/codeql-action/analyze@74c1aea9df7c0f02e9b7bfe4a8935abf2e5e3aa6 # v3
+        with:
+          category: "/language:javascript-typescript"

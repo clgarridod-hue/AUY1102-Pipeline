@@ -1,0 +1,13 @@
+node_modules
+dist
+coverage
+.git
+.github
+evidencias
+evidencias_ep3
+img
+*.md
+.npmrc
+credentials.yml
+*.log
+.DS_Store

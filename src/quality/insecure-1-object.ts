@@ -24,9 +24,9 @@ app.post('/', (req, res) => {
   const input = String(req.body.username ?? '');
   const html = renderTemplate({ username: input });
 
-  res.send(html);
+  res.json({ ok: true, renderedLength: html.length });
 });
 
 app.listen(3000, () => {
   console.log('Server is running on port 3000');
-}); 
+});
