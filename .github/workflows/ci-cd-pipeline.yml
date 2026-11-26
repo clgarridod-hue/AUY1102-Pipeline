@@ -1,0 +1,182 @@
+name: CI-CD Pipeline Docker y Calidad-Seguridad
+
+on:
+  push:
+    branches:
+      - develop
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: read
+  actions: read
+  packages: read
+
+jobs:
+  docker-build-and-test:
+    name: 1. Build Docker y Pruebas Unitarias
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Construir imagen Docker (stage test)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          target: test
+          load: true
+          tags: auy1102-pipeline:test
+
+      - name: Ejecutar pruebas unitarias dentro del contenedor
+        run: docker run --rm auy1102-pipeline:test npm run test:unit -- --forceExit
+
+      - name: Generar reporte de cobertura dentro del contenedor
+        run: |
+          docker run --name auy1102-coverage auy1102-pipeline:test npm run test:coverage -- --forceExit
+          docker cp auy1102-coverage:/usr/src/app/coverage ./coverage
+          docker rm auy1102-coverage
+          sed -i 's|SF:/usr/src/app/|SF:|g' coverage/lcov.info
+
+      - name: Subir artefacto de cobertura para SonarCloud
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage-report
+          path: coverage/lcov.info
+
+  sonarcloud-analysis:
+    name: 2. SonarCloud SAST y Quality Gate
+    needs: [docker-build-and-test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository (historial completo)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Descargar reporte de cobertura
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: coverage-report
+          path: coverage
+
+      - name: Ejecutar SonarCloud Scan y validar Quality Gate
+        uses: SonarSource/sonarqube-scan-action@2f77a1ec69fb1d595b06f35ab27e97605bdef703 # v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >
+            -Dsonar.qualitygate.wait=true
+            -Dsonar.qualitygate.timeout=300
+
+  snyk-analysis:
+    name: 3. Snyk SAST y Dependencias
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Configurar Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Instalar dependencias e instalar Snyk CLI
+        run: |
+          npm ci --ignore-scripts
+          npm install -g snyk
+
+      - name: Ejecutar Snyk Code (SAST) y Snyk Open Source (SCA)
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          set +e
+          echo "=== Ejecutando Snyk Code (Analisis Estatico de Codigo) ==="
+          snyk code test --org=clgarridod-hue --severity-threshold=high
+          SNYK_CODE_EXIT=$?
+          echo "=== Ejecutando Snyk Open Source (Dependencias Criticas) ==="
+          snyk test --org=clgarridod-hue --severity-threshold=critical
+          SNYK_OSS_EXIT=$?
+          set -e
+          if [ "$SNYK_CODE_EXIT" -ne 0 ] || [ "$SNYK_OSS_EXIT" -ne 0 ]; then
+            echo "::error::Snyk detecto problemas criticos/altos de seguridad (Code exit=$SNYK_CODE_EXIT, OSS exit=$SNYK_OSS_EXIT). Interrumpiendo despliegue."
+            exit 1
+          fi
+
+  ghas-security:
+    name: 4. GitHub Advanced Security
+    uses: ./.github/workflows/ghas-security.yml
+    secrets: inherit
+
+  docker-scout-scan:
+    name: 5. Docker Scout CVE Scan
+    needs: [docker-build-and-test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Autenticar en Docker Hub para Docker Scout
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Construir imagen candidata de produccion localmente
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          target: production
+          load: true
+          tags: auy1102-pipeline:${{ github.sha }}
+
+      - name: Analizar vulnerabilidades criticas con Docker Scout
+        uses: docker/scout-action@4bbf17a9da65a7b5497361bb407e88cc9548f69c # v1
+        with:
+          command: cves
+          image: local://auy1102-pipeline:${{ github.sha }}
+          only-severities: critical
+          exit-code: true
+
+  publish-dockerhub:
+    name: 6. Publicar Imagen en Docker Hub
+    needs:
+      - docker-build-and-test
+      - sonarcloud-analysis
+      - snyk-analysis
+      - ghas-security
+      - docker-scout-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Iniciar sesion en Docker Hub
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Construir y publicar imagen de produccion en Docker Hub
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          target: production
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/auy1102-pipeline:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/auy1102-pipeline:${{ github.sha }}
